@@ -662,6 +662,7 @@ struct GraphResponse {
     success: bool,
     nodes: Vec<GraphNode>,
     edges: Vec<GraphEdge>,
+    max_graph_render_nodes: i32,
     #[serde(skip_serializing_if = "Option::is_none")]
     error: Option<String>,
 }
@@ -790,6 +791,7 @@ async fn get_graph(data: web::Data<AppState>, req: HttpRequest) -> impl Responde
                     success: false,
                     nodes: vec![],
                     edges: vec![],
+                    max_graph_render_nodes: 0,
                     error: Some(format!("Failed to query memories: {}", e)),
                 });
             }
@@ -817,6 +819,7 @@ async fn get_graph(data: web::Data<AppState>, req: HttpRequest) -> impl Responde
                     success: false,
                     nodes: vec![],
                     edges: vec![],
+                    max_graph_render_nodes: 0,
                     error: Some(format!("Failed to query memories: {}", e)),
                 });
             }
@@ -834,6 +837,7 @@ async fn get_graph(data: web::Data<AppState>, req: HttpRequest) -> impl Responde
                     success: false,
                     nodes: vec![],
                     edges: vec![],
+                    max_graph_render_nodes: 0,
                     error: Some(format!("Failed to query associations: {}", e)),
                 });
             }
@@ -853,16 +857,20 @@ async fn get_graph(data: web::Data<AppState>, req: HttpRequest) -> impl Responde
                     success: false,
                     nodes: vec![],
                     edges: vec![],
+                    max_graph_render_nodes: 0,
                     error: Some(format!("Failed to query associations: {}", e)),
                 });
             }
         }
     };
 
+    let bot_cfg = crate::models::BotConfig::load();
+
     HttpResponse::Ok().json(GraphResponse {
         success: true,
         nodes,
         edges,
+        max_graph_render_nodes: bot_cfg.max_graph_render_nodes,
         error: None,
     })
 }

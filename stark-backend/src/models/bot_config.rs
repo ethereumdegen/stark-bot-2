@@ -43,6 +43,8 @@ pub struct BotConfig {
     pub compaction: CompactionConfig,
     #[serde(default)]
     pub services: ServicesConfig,
+    #[serde(default = "default_max_graph_render_nodes")]
+    pub max_graph_render_nodes: i32,
 }
 
 /// Compaction threshold configuration.
@@ -98,6 +100,7 @@ fn default_true() -> bool { true }
 fn default_background_threshold() -> f64 { 0.80 }
 fn default_aggressive_threshold() -> f64 { 0.85 }
 fn default_emergency_threshold() -> f64 { 0.95 }
+fn default_max_graph_render_nodes() -> i32 { 100 }
 
 /// Heartbeat scheduling settings (config only — no runtime state).
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -148,6 +151,7 @@ impl Default for BotConfig {
             session_memory_log: true,
             compaction: CompactionConfig::default(),
             services: ServicesConfig::default(),
+            max_graph_render_nodes: 100,
         }
     }
 }

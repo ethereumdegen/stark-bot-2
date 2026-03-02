@@ -271,8 +271,13 @@ export default function MemoryGraph() {
     // Centre the view
     svg.call(zoom.transform, d3.zoomIdentity.translate(width / 2, height / 2));
 
-    // Build D3 data
-    const d3Nodes: D3Node[] = graphData.nodes.map((n) => ({
+    // Build D3 data – limit to the N most recent nodes to avoid lag
+    const maxNodes = graphData.max_graph_render_nodes ?? 100;
+    const recentNodes = maxNodes > 0 && graphData.nodes.length > maxNodes
+      ? [...graphData.nodes].sort((a, b) => b.id - a.id).slice(0, maxNodes)
+      : graphData.nodes;
+
+    const d3Nodes: D3Node[] = recentNodes.map((n) => ({
       id: n.id,
       content: n.content ?? '',
       memory_type: n.memory_type ?? 'unknown',

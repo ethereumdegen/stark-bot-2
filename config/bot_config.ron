@@ -31,4 +31,5 @@ BotConfig(
         http_proxy_url: None,
         keystore_server_url: None,
     ),
+    max_graph_render_nodes: 100,
 )

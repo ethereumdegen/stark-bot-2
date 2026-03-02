@@ -229,6 +229,7 @@ export interface MemoryGraphResponse {
   success: boolean;
   nodes: GraphNode[];
   edges: GraphEdge[];
+  max_graph_render_nodes: number;
   error?: string;
 }
 

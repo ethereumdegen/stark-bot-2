@@ -28,9 +28,9 @@
         { "to": "/memories", "icon": "Brain", "label": "Memories" },
         { "to": "/identities", "icon": "Users", "label": "Identities" },
         { "to": "/files", "icon": "FolderOpen", "label": "Workspace Files" },
-        { "to": "/crypto-transactions", "icon": "Wallet", "label": "Crypto Transactions" },
         { "to": "/system-files", "icon": "Sparkles", "label": "System Files" },
-        { "to": "/notes", "icon": "BookOpen", "label": "Notes" }
+        { "to": "/notes", "icon": "BookOpen", "label": "Notes" },
+        { "to": "/crypto-transactions", "icon": "Wallet", "label": "Crypto Transactions" }
       ]
     },
     {
