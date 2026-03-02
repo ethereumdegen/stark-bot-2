@@ -1,8 +1,7 @@
 //! Select Web3 Network tool
 //!
 //! Allows the Finance agent to select the active blockchain network for subsequent
-//! web3 operations. This is especially important for tools like Polymarket (Polygon),
-//! token operations on specific chains, etc.
+//! web3 operations (token operations on specific chains, etc.).
 //!
 //! The selected network is stored in the `network_name` register and will be used
 //! by default for subsequent web3 calls unless explicitly overridden.
@@ -57,7 +56,6 @@ impl SelectWeb3NetworkTool {
                 name: "select_web3_network".to_string(),
                 description: "Select the active blockchain network for web3 operations.\n\n\
                     Call this tool BEFORE performing network-specific operations:\n\
-                    • Polymarket trading requires 'polygon'\n\
                     • Starkbot token operations require 'base'\n\
                     • Most DeFi on Ethereum requires 'mainnet'\n\n\
                     The selected network is stored in the 'network_name' register and used \

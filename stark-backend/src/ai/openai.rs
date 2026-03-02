@@ -217,11 +217,10 @@ impl OpenAIClient {
             None
         };
 
-        // Map PaymentMode to the payment_type string for the request body
-        let payment_type_str = match mode {
-            crate::x402::PaymentMode::Credits => Some("credits".to_string()),
-            crate::x402::PaymentMode::CustomEndpoint => None,
-        };
+        // Don't send payment_type in the request body — the server auto-detects
+        // payment method from auth headers (Bearer session token or ERC-8128).
+        // The body field is only needed if the client wants to force a specific mode.
+        let payment_type_str: Option<String> = None;
 
         // Determine model: use provided model, or infer from endpoint URL
         let effective_model = match model {

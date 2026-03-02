@@ -61,21 +61,6 @@ RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg | d
     && apt-get install -y gh \
     && rm -rf /var/lib/apt/lists/*
 
-# Install Railway CLI
-RUN curl -fsSL "https://github.com/railwayapp/cli/releases/download/v4.29.0/railway-v4.29.0-x86_64-unknown-linux-gnu.tar.gz" \
-    | tar xz -C /usr/local/bin/ \
-    && chmod +x /usr/local/bin/railway
-
-# Install Supabase CLI
-RUN curl -fsSL "https://github.com/supabase/cli/releases/download/v2.75.0/supabase_linux_amd64.tar.gz" \
-    | tar xz -C /usr/local/bin/ supabase \
-    && chmod +x /usr/local/bin/supabase
-
-# Install gog CLI (Google Workspace — Gmail, Calendar, Drive, Sheets, Docs)
-RUN curl -fsSL "https://github.com/steipete/gogcli/releases/download/v0.11.0/gogcli_0.11.0_linux_amd64.tar.gz" \
-    | tar xz -C /usr/local/bin/ \
-    && chmod +x /usr/local/bin/gog
-
 # Install Deno (runtime for JS/TS modules like openagent — no npm install needed)
 RUN curl -fsSL https://github.com/denoland/deno/releases/latest/download/deno-x86_64-unknown-linux-gnu.zip -o /tmp/deno.zip \
     && unzip -o /tmp/deno.zip -d /usr/local/bin/ \
