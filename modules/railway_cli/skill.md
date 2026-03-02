@@ -39,7 +39,7 @@ command: railway --version
 timeout: 30
 ```
 
-Railway CLI is pre-installed in the Docker container. If missing, report to admin.
+Railway CLI is installed by the `railway_cli` module. If missing, reinstall via `manage_modules(action="install", name="railway_cli")`.
 
 ---
 

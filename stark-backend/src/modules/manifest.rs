@@ -21,6 +21,8 @@ pub struct ModuleManifest {
     #[serde(default)]
     pub platforms: Option<PlatformConfig>,
     #[serde(default)]
+    pub install: Option<InstallConfig>,
+    #[serde(default)]
     pub tools: Vec<ToolManifest>,
     /// External HTTP endpoints exposed publicly via `/ext/{module}/{method}`.
     #[serde(default)]
@@ -127,6 +129,17 @@ pub struct AgentConfig {
     /// Relative path to the agent directory (e.g. "agent").
     /// Must contain `agent.md` and optionally `hooks/`.
     pub dir: String,
+}
+
+/// Install/uninstall script configuration.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InstallConfig {
+    /// Script to run on install (relative to module dir), e.g. "install.sh"
+    #[serde(default)]
+    pub script: Option<String>,
+    /// Script to run on uninstall (relative to module dir), e.g. "uninstall.sh"
+    #[serde(default)]
+    pub uninstall_script: Option<String>,
 }
 
 /// Supported platforms list.
@@ -568,5 +581,42 @@ default_port = 9200
 "#;
         let manifest = ModuleManifest::from_str(toml).unwrap();
         assert!(manifest.agent.is_none());
+    }
+
+    #[test]
+    fn test_parse_install_config() {
+        let toml = r#"
+[module]
+name = "railway_cli"
+version = "1.0.0"
+description = "Railway CLI tool"
+
+[service]
+default_port = 0
+
+[install]
+script = "install.sh"
+uninstall_script = "uninstall.sh"
+"#;
+        let manifest = ModuleManifest::from_str(toml).unwrap();
+        let install = manifest.install.unwrap();
+        assert_eq!(install.script.as_deref(), Some("install.sh"));
+        assert_eq!(install.uninstall_script.as_deref(), Some("uninstall.sh"));
+    }
+
+    #[test]
+    fn test_parse_install_config_optional() {
+        // No [install] section should parse fine
+        let toml = r#"
+[module]
+name = "basic"
+version = "1.0.0"
+description = "Basic module"
+
+[service]
+default_port = 9200
+"#;
+        let manifest = ModuleManifest::from_str(toml).unwrap();
+        assert!(manifest.install.is_none());
     }
 }

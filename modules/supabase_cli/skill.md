@@ -35,7 +35,7 @@ command: supabase --version
 timeout: 30
 ```
 
-Supabase CLI is pre-installed in the Docker container. If missing, report to admin.
+Supabase CLI is installed by the `supabase_cli` module. If missing, reinstall via `manage_modules(action="install", name="supabase_cli")`.
 
 ---
 

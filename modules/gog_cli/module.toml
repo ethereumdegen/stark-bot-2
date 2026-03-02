@@ -1,0 +1,15 @@
+[module]
+name = "gog_cli"
+version = "1.0.0"
+author = "starkbot"
+description = "gog CLI — AI-powered git commit message generator and workflow tool"
+
+[service]
+default_port = 0
+
+[skill]
+content_file = "skill.md"
+
+[install]
+script = "install.sh"
+uninstall_script = "uninstall.sh"

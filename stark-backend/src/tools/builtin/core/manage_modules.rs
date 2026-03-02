@@ -114,6 +114,44 @@ fn parse_remote_name(name: &str) -> Option<(&str, &str)> {
     }
 }
 
+/// Run a module install/uninstall script (e.g. install.sh).
+/// `module_dir` is the module's directory on disk; `script` is the relative path.
+/// Returns Ok(stdout+stderr) on success, Err on failure.
+fn run_module_script(module_dir: &std::path::Path, script: &str) -> Result<String, String> {
+    let script_path = module_dir.join(script);
+    if !script_path.exists() {
+        return Err(format!("Script not found: {}", script_path.display()));
+    }
+
+    // Make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    let output = std::process::Command::new("bash")
+        .arg(&script_path)
+        .current_dir(module_dir)
+        .output()
+        .map_err(|e| format!("Failed to run {}: {}", script, e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+
+    if output.status.success() {
+        Ok(format!("{}{}", stdout, stderr))
+    } else {
+        Err(format!(
+            "Script '{}' failed (exit {}):\n{}{}",
+            script,
+            output.status.code().unwrap_or(-1),
+            stdout,
+            stderr
+        ))
+    }
+}
+
 #[async_trait]
 impl Tool for ManageModulesTool {
     fn definition(&self) -> ToolDefinition {
@@ -182,6 +220,20 @@ impl Tool for ManageModulesTool {
                     None => return ToolResult::error(format!("Unknown module: '{}'. Use action='list' to see available modules, or 'search_hub' to find remote modules.", name)),
                 };
 
+                // Run install script if configured (before DB registration so failure prevents install)
+                if let Some(module_dir) = module.module_dir() {
+                    let manifest_path = module_dir.join("module.toml");
+                    if let Ok(manifest) = crate::modules::manifest::ModuleManifest::from_file(&manifest_path) {
+                        if let Some(ref install_cfg) = manifest.install {
+                            if let Some(ref script) = install_cfg.script {
+                                if let Err(e) = run_module_script(module_dir, script) {
+                                    return ToolResult::error(format!("Install script failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match db.install_module(
                     name,
                     module.description(),
@@ -218,6 +270,24 @@ impl Tool for ManageModulesTool {
                     Some(n) => n,
                     None => return ToolResult::error("'name' is required for 'uninstall' action"),
                 };
+
+                // Run uninstall script if configured
+                let registry = crate::modules::ModuleRegistry::new();
+                if let Some(module) = registry.get(name) {
+                    if let Some(module_dir) = module.module_dir() {
+                        let manifest_path = module_dir.join("module.toml");
+                        if let Ok(manifest) = crate::modules::manifest::ModuleManifest::from_file(&manifest_path) {
+                            if let Some(ref install_cfg) = manifest.install {
+                                if let Some(ref script) = install_cfg.uninstall_script {
+                                    if let Err(e) = run_module_script(module_dir, script) {
+                                        log::warn!("[MODULE] Uninstall script for '{}' failed: {}", name, e);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+
                 match db.uninstall_module(name) {
                     Ok(true) => ToolResult::success(format!(
                         "Module '{}' uninstalled. The service continues running independently.",
@@ -413,6 +483,19 @@ impl Tool for ManageModulesTool {
                     );
                 }
 
+                // Run install script if manifest has one
+                if manifest_path.exists() {
+                    if let Ok(manifest) = crate::modules::manifest::ModuleManifest::from_file(&manifest_path) {
+                        if let Some(ref install_cfg) = manifest.install {
+                            if let Some(ref script) = install_cfg.script {
+                                if let Err(e) = run_module_script(&module_dir, script) {
+                                    return ToolResult::error(format!("Install script failed: {}", e));
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Register in database
                 let author_str = module_info.author.username
                     .as_deref()
@@ -530,6 +613,15 @@ impl Tool for ManageModulesTool {
                     Ok(dir) => dir,
                     Err(e) => return ToolResult::error(format!("Failed to extract module: {}", e)),
                 };
+
+                // Run install script if manifest has one
+                if let Some(ref install_cfg) = parsed.manifest.install {
+                    if let Some(ref script) = install_cfg.script {
+                        if let Err(e) = run_module_script(&module_dir, script) {
+                            return ToolResult::error(format!("Install script failed: {}", e));
+                        }
+                    }
+                }
 
                 // Read manifest info for DB registration
                 let manifest = &parsed.manifest;
