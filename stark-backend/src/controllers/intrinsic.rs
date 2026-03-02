@@ -268,6 +268,16 @@ async fn read_by_path(
 
     let content = match fs::read_to_string(&full_path).await {
         Ok(c) => c,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            // File doesn't exist yet (e.g. agent_preset.ron in standard mode)
+            return HttpResponse::Ok().json(ReadIntrinsicResponse {
+                success: true,
+                name: intrinsic.name.to_string(),
+                content: None,
+                writable: intrinsic.writable,
+                error: None,
+            });
+        }
         Err(e) => {
             log::error!("Failed to read intrinsic file {}: {}", intrinsic.name, e);
             return HttpResponse::InternalServerError().json(ReadIntrinsicResponse {
