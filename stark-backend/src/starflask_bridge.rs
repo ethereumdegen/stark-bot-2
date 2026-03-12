@@ -90,13 +90,32 @@ pub fn format_results(results: &[ExecutionResult]) -> Value {
     })
 }
 
+/// Extract URLs from free-form text by whitespace-splitting and checking for URL prefixes.
+pub fn extract_urls_from_text(text: &str) -> Vec<String> {
+    text.split_whitespace()
+        .filter(|word| word.starts_with("http://") || word.starts_with("https://"))
+        .map(|url| url.trim_end_matches(|c: char| c == ',' || c == ')' || c == ']' || c == '>' || c == '"' || c == '\'').to_string())
+        .collect()
+}
+
 /// Extract media URLs from a session result (image/video generation).
-pub fn parse_media_result(result: &Option<Value>) -> Vec<String> {
-    let Some(value) = result else { return vec![]; };
+///
+/// Checks structured fields first (`urls`, `url`, `media`), then falls back to
+/// scanning text fields in `result` and the optional `result_summary` for URLs.
+pub fn parse_media_result(result: &Option<Value>, result_summary: Option<&str>) -> Vec<String> {
+    let Some(value) = result else {
+        // No structured result — try result_summary text
+        if let Some(summary) = result_summary {
+            let urls = extract_urls_from_text(summary);
+            if !urls.is_empty() { return urls; }
+        }
+        return vec![];
+    };
 
     // Try "urls" array
     if let Some(urls) = value.get("urls").and_then(|v| v.as_array()) {
-        return urls.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        let extracted: Vec<String> = urls.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+        if !extracted.is_empty() { return extracted; }
     }
 
     // Try "url" string
@@ -106,9 +125,30 @@ pub fn parse_media_result(result: &Option<Value>) -> Vec<String> {
 
     // Try "media" array
     if let Some(media) = value.get("media").and_then(|v| v.as_array()) {
-        return media.iter()
+        let extracted: Vec<String> = media.iter()
             .filter_map(|m| m.get("url").and_then(|v| v.as_str()).map(String::from))
             .collect();
+        if !extracted.is_empty() { return extracted; }
+    }
+
+    // Fallback: scan text fields in the result object for URLs
+    for key in &["text", "message", "response", "summary"] {
+        if let Some(text) = value.get(key).and_then(|v| v.as_str()) {
+            let urls = extract_urls_from_text(text);
+            if !urls.is_empty() { return urls; }
+        }
+    }
+
+    // Fallback: if the result itself is a string, scan it
+    if let Some(text) = value.as_str() {
+        let urls = extract_urls_from_text(text);
+        if !urls.is_empty() { return urls; }
+    }
+
+    // Final fallback: scan result_summary
+    if let Some(summary) = result_summary {
+        let urls = extract_urls_from_text(summary);
+        if !urls.is_empty() { return urls; }
     }
 
     vec![]

@@ -295,21 +295,43 @@ async fn capability_query(
 }
 
 /// POST /api/starflask/agents/{capability}/fire_hook
+///
+/// When `wait=true`, routes through `CommandRouter::fire_hook_with_delegation()` so that
+/// hook-driven agents can delegate to specialists. Falls back to raw Starflask if no
+/// command router is available.
 async fn capability_fire_hook(
     state: web::Data<AppState>, req: HttpRequest, path: web::Path<String>, body: web::Json<serde_json::Value>,
 ) -> HttpResponse {
     if let Err(resp) = super::validate_session(&state, &req) { return resp; }
-    let sf = match require_starflask(&state).await { Ok(sf) => sf, Err(resp) => return resp };
-    let agent_id = match resolve_capability(&state, &path.into_inner()) { Ok(id) => id, Err(resp) => return resp };
 
-    let event = body.get("event").and_then(|v| v.as_str()).unwrap_or("");
+    let capability = path.into_inner();
+    let event = body.get("event").and_then(|v| v.as_str()).unwrap_or("").to_string();
     let payload = body.get("payload").cloned().unwrap_or(json!({}));
     let wait = body.get("wait").and_then(|v| v.as_bool()).unwrap_or(false);
 
+    // When wait=true, try routing through command router for delegation support
+    if wait {
+        let guard = state.command_router.read().await;
+        if let Some(router) = guard.as_ref() {
+            let router = router.clone();
+            drop(guard);
+            match router.fire_hook_with_delegation(&capability, &event, payload).await {
+                Ok(output) => return HttpResponse::Ok().json(output),
+                Err(e) => return HttpResponse::BadRequest().json(json!({ "error": e })),
+            }
+        }
+        drop(guard);
+        // Fall through to raw Starflask call if no command router
+    }
+
+    // Raw Starflask call (no delegation support)
+    let sf = match require_starflask(&state).await { Ok(sf) => sf, Err(resp) => return resp };
+    let agent_id = match resolve_capability(&state, &capability) { Ok(id) => id, Err(resp) => return resp };
+
     let result = if wait {
-        sf.fire_hook_and_wait(&agent_id, event, payload).await
+        sf.fire_hook_and_wait(&agent_id, &event, payload).await
     } else {
-        sf.fire_hook(&agent_id, event, payload).await
+        sf.fire_hook(&agent_id, &event, payload).await
     };
 
     match result {
