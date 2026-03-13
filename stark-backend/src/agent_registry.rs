@@ -98,6 +98,25 @@ impl AgentRegistry {
             ));
         }
 
+        // Prune local agents that no longer exist remotely
+        let remote_agent_ids: Vec<String> = agents.iter().map(|a| a.id.to_string()).collect();
+        for local in &existing {
+            if !remote_agent_ids.contains(&local.agent_id) {
+                log::info!(
+                    "[AgentRegistry] Pruning ghost agent: {} ({})",
+                    local.capability, local.agent_id
+                );
+                let _ = self.db.delete_starflask_agent(&local.capability);
+                self.broadcaster.broadcast(GatewayEvent::new(
+                    "starflask.agent_removed",
+                    serde_json::json!({
+                        "capability": &local.capability,
+                        "agent_id": &local.agent_id,
+                    }),
+                ));
+            }
+        }
+
         // Ensure at least a "general" capability exists
         if self.db.get_starflask_agent("general").ok().flatten().is_none() {
             // Assign the first available agent as "general"
