@@ -168,9 +168,12 @@ impl AgentRegistry {
             }
         }
 
-        // Ensure at least a "general" capability exists
-        if self.db.get_starflask_agent("general").ok().flatten().is_none() {
-            // Assign the first available agent as "general"
+        // Ensure at least a "general" capability exists — but only if there's
+        // no seed config (which will provision a proper general agent).
+        if self.db.get_starflask_agent("general").ok().flatten().is_none()
+            && StarflaskSeed::load().is_none()
+        {
+            // No seed config — assign the first available agent as "general"
             if let Some(first) = agents.first() {
                 let description = first.description.as_deref().unwrap_or("");
                 self.db.upsert_starflask_agent_str(
