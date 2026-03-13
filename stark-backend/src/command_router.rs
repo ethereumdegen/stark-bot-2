@@ -234,11 +234,28 @@ impl CommandRouter {
             }
 
             _ => {
+                // Try to detect media URLs in the result (e.g. general agent generated an image)
+                let media_urls = starflask_bridge::parse_media_result(result, result_summary);
+                if !media_urls.is_empty() {
+                    return Ok(CommandOutput::MediaGeneration { urls: media_urls, media_type: "image".to_string() });
+                }
+
                 let text = starflask_bridge::parse_text_result(result);
                 if text.is_empty() {
                     Ok(CommandOutput::Raw { data: result.clone().unwrap_or(Value::Null) })
                 } else {
-                    Ok(CommandOutput::TextResponse { text })
+                    // Also check if the text response contains media URLs
+                    let urls = starflask_bridge::extract_urls_from_text(&text);
+                    let has_media_url = urls.iter().any(|u| {
+                        u.contains(".jpg") || u.contains(".jpeg") || u.contains(".png")
+                        || u.contains(".webp") || u.contains(".gif") || u.contains(".mp4")
+                        || u.contains("fal.media") || u.contains("replicate.delivery")
+                    });
+                    if has_media_url {
+                        Ok(CommandOutput::MediaGeneration { urls, media_type: "image".to_string() })
+                    } else {
+                        Ok(CommandOutput::TextResponse { text })
+                    }
                 }
             }
         }
