@@ -1,5 +1,5 @@
 import { useState, useCallback, useEffect, useRef } from 'react';
-import { Send, ChevronDown } from 'lucide-react';
+import { Send } from 'lucide-react';
 import { apiFetch } from '@/lib/api';
 import { useApi } from '@/hooks/useApi';
 import { useGateway } from '@/hooks/useGateway';
@@ -29,21 +29,6 @@ interface CommandOutput {
   data?: unknown;
 }
 
-const CAPABILITIES = [
-  { value: '', label: 'Orchestrator' },
-  { value: 'general', label: 'General' },
-  { value: 'crypto', label: 'Crypto' },
-  { value: 'image_gen', label: 'Image Gen' },
-  { value: 'video_gen', label: 'Video Gen' },
-];
-
-const capabilityColor: Record<string, string> = {
-  '': 'bg-stark-500/20 text-stark-400 border-stark-500/30',
-  crypto: 'bg-amber-500/20 text-amber-400 border-amber-500/30',
-  image_gen: 'bg-pink-500/20 text-pink-400 border-pink-500/30',
-  video_gen: 'bg-purple-500/20 text-purple-400 border-purple-500/30',
-  general: 'bg-green-500/20 text-green-400 border-green-500/30',
-};
 
 function formatCommandResult(result: CommandOutput): string {
   if (result.type === 'TextResponse' && result.text) {
@@ -89,12 +74,9 @@ function commandsToMessages(commands: CommandLog[]): ChatMessage[] {
 export default function CommandCenter() {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
-  const [capability, setCapability] = useState('');
   const [sending, setSending] = useState(false);
-  const [showCapPicker, setShowCapPicker] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const capPickerRef = useRef<HTMLDivElement>(null);
 
   const { data: commands } = useApi<CommandLog[]>('/starflask/commands?limit=50');
   const { on, off } = useGateway();
@@ -113,17 +95,6 @@ export default function CommandCenter() {
       el.scrollTop = el.scrollHeight;
     }
   }, [messages, sending]);
-
-  // Close capability picker on outside click
-  useEffect(() => {
-    const handler = (e: MouseEvent) => {
-      if (capPickerRef.current && !capPickerRef.current.contains(e.target as Node)) {
-        setShowCapPicker(false);
-      }
-    };
-    document.addEventListener('mousedown', handler);
-    return () => document.removeEventListener('mousedown', handler);
-  }, []);
 
   // WebSocket events
   useEffect(() => {
@@ -200,7 +171,6 @@ export default function CommandCenter() {
 
     try {
       const body: Record<string, unknown> = { message: text };
-      if (capability) body.capability = capability;
 
       const result = await apiFetch<CommandOutput>('/starflask/command', {
         method: 'POST',
@@ -239,7 +209,7 @@ export default function CommandCenter() {
         },
       ]);
     }
-  }, [input, capability]);
+  }, [input]);
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
     if (e.key === 'Enter' && !e.shiftKey) {
@@ -247,8 +217,6 @@ export default function CommandCenter() {
       handleSend();
     }
   };
-
-  const selectedCap = CAPABILITIES.find((c) => c.value === capability) || CAPABILITIES[0];
 
   return (
     <div className="flex flex-col h-[calc(100vh-4rem)]">
@@ -279,44 +247,6 @@ export default function CommandCenter() {
       {/* Input bar */}
       <div className="border-t border-slate-700/50 px-6 py-3 bg-slate-900/80">
         <div className="flex items-end gap-2">
-          {/* Capability pill */}
-          <div className="relative" ref={capPickerRef}>
-            <button
-              onClick={() => setShowCapPicker(!showCapPicker)}
-              className={`flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-medium border transition-colors ${capabilityColor[capability] || capabilityColor['']}`}
-            >
-              {selectedCap.label}
-              <ChevronDown className="w-3 h-3" />
-            </button>
-            {showCapPicker && (
-              <div className="absolute bottom-full mb-2 left-0 bg-slate-800 border border-slate-700 rounded-lg shadow-xl py-1 min-w-[160px] z-50">
-                {CAPABILITIES.map((c) => (
-                  <button
-                    key={c.value}
-                    onClick={() => {
-                      setCapability(c.value);
-                      setShowCapPicker(false);
-                    }}
-                    className={`w-full text-left px-3 py-2 text-sm transition-colors ${
-                      capability === c.value
-                        ? 'bg-slate-700 text-white'
-                        : 'text-slate-300 hover:bg-slate-700/50 hover:text-white'
-                    }`}
-                  >
-                    <span className={`inline-block w-2 h-2 rounded-full mr-2 ${
-                      c.value === '' ? 'bg-stark-400' :
-                      c.value === 'crypto' ? 'bg-amber-400' :
-                      c.value === 'image_gen' ? 'bg-pink-400' :
-                      c.value === 'video_gen' ? 'bg-purple-400' :
-                      'bg-green-400'
-                    }`} />
-                    {c.label}
-                  </button>
-                ))}
-              </div>
-            )}
-          </div>
-
           {/* Text input */}
           <textarea
             ref={inputRef}
