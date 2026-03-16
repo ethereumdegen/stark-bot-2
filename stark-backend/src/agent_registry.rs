@@ -440,6 +440,8 @@ impl AgentRegistry {
             "video_gen".to_string()
         } else if name_lower.contains("discord") {
             "discord_moderator".to_string()
+        } else if name_lower.contains("stock") || name_lower.contains("market analyst") {
+            "stock_analyst".to_string()
         } else if name_lower.contains("telegram") {
             "telegram_moderator".to_string()
         } else {
