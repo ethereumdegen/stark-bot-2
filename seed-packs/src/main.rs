@@ -37,21 +37,25 @@ fn capability_from_filename(stem: &str) -> &str {
     }
 }
 
-fn load_existing_hashes(config_path: &Path) -> HashMap<String, Vec<String>> {
-    let mut map = HashMap::new();
+fn load_existing_entries(config_path: &Path) -> Vec<AgentSeed> {
+    let mut entries = Vec::new();
     if let Ok(content) = std::fs::read_to_string(config_path) {
         for line in content.lines() {
             let line = line.trim();
             if line.starts_with("AgentSeed(") {
                 let cap = extract_field(line, "capability");
-                let hashes = extract_hashes(line);
                 if !cap.is_empty() {
-                    map.insert(cap, hashes);
+                    entries.push(AgentSeed {
+                        capability: cap,
+                        name: extract_field(line, "name"),
+                        description: extract_field(line, "description"),
+                        pack_hashes: extract_hashes(line),
+                    });
                 }
             }
         }
     }
-    map
+    entries
 }
 
 fn extract_field(line: &str, field: &str) -> String {
@@ -66,6 +70,12 @@ fn extract_field(line: &str, field: &str) -> String {
 }
 
 fn extract_hashes(line: &str) -> Vec<String> {
+    // Try pack_hash: "..." (singular — runtime format)
+    let hash = extract_field(line, "pack_hash");
+    if !hash.is_empty() && !hash.contains("...") {
+        return vec![hash];
+    }
+    // Fallback: pack_hashes: ["..."] (array format)
     let mut hashes = Vec::new();
     if let Some(start) = line.find("pack_hashes: [") {
         let rest = &line[start + 14..];
@@ -172,7 +182,10 @@ async fn main() {
     }
     println!();
 
-    let existing = load_existing_hashes(&config_path);
+    let existing_entries = load_existing_entries(&config_path);
+    let existing: HashMap<String, Vec<String>> = existing_entries.iter()
+        .map(|e| (e.capability.clone(), e.pack_hashes.clone()))
+        .collect();
 
     let mut entries: Vec<PathBuf> = std::fs::read_dir(&packs_dir)
         .expect("Cannot read packs directory")
@@ -271,6 +284,14 @@ async fn main() {
         }
     }
 
+    // Preserve existing config entries that have no pack file (e.g. externally provisioned)
+    let seen: std::collections::HashSet<String> = results.iter().map(|r| r.capability.clone()).collect();
+    for entry in &existing_entries {
+        if !seen.contains(&entry.capability) && !entry.pack_hashes.is_empty() {
+            results.push(entry.clone());
+        }
+    }
+
     write_seed_config(&config_path, &results);
 
     println!();
@@ -287,13 +308,13 @@ fn write_seed_config(path: &Path, agents: &[AgentSeed]) {
     let mut ron = String::from("StarflaskSeed(\n    agents: [\n");
 
     for agent in agents {
-        let hashes: Vec<String> = agent.pack_hashes.iter().map(|h| format!("\"{}\"", h)).collect();
+        let hash = agent.pack_hashes.first().map(|h| h.as_str()).unwrap_or("");
         ron.push_str(&format!(
-            "        AgentSeed(capability: \"{}\", name: \"{}\", description: \"{}\", pack_hashes: [{}]),\n",
+            "        AgentSeed(capability: \"{}\", name: \"{}\", description: \"{}\", pack_hash: \"{}\"),\n",
             agent.capability,
             agent.name.replace('"', "\\\""),
             agent.description.replace('"', "\\\""),
-            hashes.join(", "),
+            hash,
         ));
     }
 
