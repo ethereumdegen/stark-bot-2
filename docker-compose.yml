@@ -3,6 +3,8 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      additional_contexts:
+        - starflask-src=../starflask-monorepo/starflask-rs
     ports:
       - "8080:8080"   # HTTP API + Frontend + WebSocket Gateway (/ws)
     env_file:

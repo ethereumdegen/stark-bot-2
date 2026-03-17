@@ -123,7 +123,7 @@ impl AgentRegistry {
 
         if agents.is_empty() {
             log::info!("[AgentRegistry] No remote agents found, creating a General Assistant");
-            let agent = self.starflask.create_agent("General Assistant").await
+            let agent = self.starflask.create_agent("General Assistant", Some(&project_id)).await
                 .map_err(|e| format!("Failed to create agent: {}", e))?;
 
             self.db.upsert_starflask_agent(
@@ -184,19 +184,20 @@ impl AgentRegistry {
                 continue;
             }
 
-            // Match by pack hash first, fall back to name inference
-            let capability = agent.axoniac_agent_hash.as_deref()
+            // Match by pack hash only — no guessing
+            let capability = match agent.axoniac_agent_hash.as_deref()
                 .and_then(|hash| hash_to_capability.get(hash))
                 .cloned()
-                .unwrap_or_else(|| {
-                    let name_lower = agent.name.to_lowercase();
-                    let inferred = self.infer_capability(&name_lower);
+            {
+                Some(cap) => cap,
+                None => {
                     log::info!(
-                        "[AgentRegistry] No pack hash match for '{}', inferred capability: {}",
-                        agent.name, inferred
+                        "[AgentRegistry] No pack hash match for '{}', skipping (will be picked up after pack is installed)",
+                        agent.name
                     );
-                    inferred
-                });
+                    continue;
+                }
+            };
 
             let description = agent.description.as_deref().unwrap_or("");
 
@@ -305,8 +306,39 @@ impl AgentRegistry {
                         agent_seed.capability
                     );
                     let _ = self.db.delete_starflask_agent(&agent_seed.capability);
+                } else if !existing_agent.pack_hashes.is_empty()
+                    && existing_agent.pack_hashes.contains(&agent_seed.pack_hash)
+                {
+                    // Already provisioned with the current seed hash
+                    continue;
                 } else if !existing_agent.pack_hashes.is_empty() {
-                    // Already fully provisioned
+                    // Agent has a pack but it's stale (seed hash changed) — re-provision pack
+                    log::info!(
+                        "[AgentRegistry] Pack hash changed for '{}', re-provisioning (old: {:?}, new: {})",
+                        agent_seed.capability, existing_agent.pack_hashes, agent_seed.pack_hash
+                    );
+                    if let Ok(agent_id) = Uuid::parse_str(&existing_agent.agent_id) {
+                        if let Err(e) = self.provision_or_install_pack(&agent_id, &agent_seed.capability, &agent_seed.pack_hash).await {
+                            log::warn!("[AgentRegistry] Failed to update pack on '{}': {}", agent_seed.name, e);
+                            continue;
+                        }
+                        let _ = self.starflask.update_agent(&agent_id, &agent_seed.name, Some(&agent_seed.description)).await;
+                        let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
+                        let _ = self.db.upsert_starflask_agent(
+                            &agent_seed.capability, &agent_id, &agent_seed.name,
+                            &agent_seed.description, pack_hashes, "provisioned",
+                        );
+                        provisioned.push(agent_seed.capability.clone());
+                        self.broadcaster.broadcast(GatewayEvent::new(
+                            "starflask.agent_provisioned",
+                            serde_json::json!({
+                                "capability": &agent_seed.capability,
+                                "agent_id": agent_id.to_string(),
+                                "name": &agent_seed.name,
+                                "pack_updated": true,
+                            }),
+                        ));
+                    }
                     continue;
                 } else {
                     // Agent exists but has no packs — provision pack on it
@@ -319,7 +351,7 @@ impl AgentRegistry {
                             log::warn!("[AgentRegistry] Failed to install pack on '{}': {}", agent_seed.name, e);
                         }
                         if existing_agent.description.is_empty() {
-                            let _ = self.starflask.update_agent(&agent_id, None, Some(&agent_seed.description)).await;
+                            let _ = self.starflask.update_agent(&agent_id, &agent_seed.name, Some(&agent_seed.description)).await;
                         }
                         let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
                         let _ = self.db.upsert_starflask_agent(
@@ -343,7 +375,7 @@ impl AgentRegistry {
             // No existing agent (or ghost was pruned) — create a new one
             log::info!("[AgentRegistry] Provisioning agent: {} ({})", agent_seed.name, agent_seed.capability);
 
-            let agent = match self.starflask.create_agent(&agent_seed.name).await {
+            let agent = match self.starflask.create_agent(&agent_seed.name, project_id.as_ref()).await {
                 Ok(a) => a,
                 Err(e) => {
                     log::error!("[AgentRegistry] Failed to create agent '{}': {}", agent_seed.name, e);
@@ -351,14 +383,7 @@ impl AgentRegistry {
                 }
             };
 
-            // Assign to project
-            if let Some(ref pid) = project_id {
-                if let Err(e) = self.assign_to_project(&agent.id, pid).await {
-                    log::warn!("[AgentRegistry] Failed to assign '{}' to project: {}", agent_seed.name, e);
-                }
-            }
-
-            if let Err(e) = self.starflask.update_agent(&agent.id, None, Some(&agent_seed.description)).await {
+            if let Err(e) = self.starflask.update_agent(&agent.id, &agent_seed.name, Some(&agent_seed.description)).await {
                 log::warn!("[AgentRegistry] Failed to set description for '{}': {}", agent_seed.name, e);
             }
 
@@ -509,17 +534,11 @@ impl AgentRegistry {
             let _ = self.db.delete_starflask_agent(capability);
         }
 
-        let agent = self.starflask.create_agent(&agent_seed.name).await
+        let project_id = self.ensure_project().await.ok();
+        let agent = self.starflask.create_agent(&agent_seed.name, project_id.as_ref()).await
             .map_err(|e| format!("Failed to create agent: {}", e))?;
 
-        // Assign to project
-        if let Ok(project_id) = self.ensure_project().await {
-            if let Err(e) = self.assign_to_project(&agent.id, &project_id).await {
-                log::warn!("[AgentRegistry] Failed to assign reprovisioned '{}' to project: {}", capability, e);
-            }
-        }
-
-        let _ = self.starflask.update_agent(&agent.id, None, Some(&agent_seed.description)).await;
+        let _ = self.starflask.update_agent(&agent.id, &agent_seed.name, Some(&agent_seed.description)).await;
 
         self.provision_or_install_pack(&agent.id, capability, &agent_seed.pack_hash).await
             .map_err(|e| format!("Agent created (id={}) but pack install failed: {}", agent.id, e))?;
@@ -546,24 +565,4 @@ impl AgentRegistry {
         self.db.list_starflask_agents()
     }
 
-    /// Infer capability from agent name.
-    fn infer_capability(&self, name_lower: &str) -> String {
-        if name_lower.contains("stock") || name_lower.contains("analyst") || name_lower.contains("market") {
-            "stock_analyst".to_string()
-        } else if name_lower.contains("crypto") || name_lower.contains("wallet") || name_lower.contains("swap") {
-            "crypto".to_string()
-        } else if name_lower.contains("image") || name_lower.contains("art") || name_lower.contains("picture") {
-            "image_gen".to_string()
-        } else if name_lower.contains("video") || name_lower.contains("clip") {
-            "video_gen".to_string()
-        } else if name_lower.contains("discord") {
-            "discord_moderator".to_string()
-        } else if name_lower.contains("stock") || name_lower.contains("market analyst") {
-            "stock_analyst".to_string()
-        } else if name_lower.contains("telegram") {
-            "telegram_moderator".to_string()
-        } else {
-            "general".to_string()
-        }
-    }
 }

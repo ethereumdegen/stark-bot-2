@@ -121,6 +121,6 @@ case "$CMD" in
     restart) cmd_restart ;;
     status)  cmd_status ;;
     -h|--help|help) usage ;;
-    "")      usage ;;
+    "")      cmd_run ;;
     *)       echo "Unknown command: $CMD"; usage; exit 1 ;;
 esac

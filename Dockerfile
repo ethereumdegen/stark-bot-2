@@ -26,6 +26,9 @@ RUN apt-get update && apt-get install -y pkg-config libssl-dev && rm -rf /var/li
 # Copy source code
 COPY . .
 
+# Copy starflask dependency from additional build context
+COPY --from=starflask-src / /starflask-monorepo/starflask-rs/
+
 # Remove workspace members with external deps not available in Docker
 RUN sed -i 's/, "seed-packs"//' Cargo.toml
 

@@ -477,7 +477,10 @@ async fn remote_create_agent(
     let sf = match require_starflask(&state).await { Ok(sf) => sf, Err(resp) => return resp };
 
     let name = body.get("name").and_then(|v| v.as_str()).unwrap_or("Untitled Agent");
-    match sf.create_agent(name).await {
+    let project_id = body.get("project_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| uuid::Uuid::parse_str(s).ok());
+    match sf.create_agent(name, project_id.as_ref()).await {
         Ok(agent) => HttpResponse::Created().json(agent),
         Err(e) => HttpResponse::BadRequest().json(json!({ "error": e.to_string() })),
     }
@@ -505,7 +508,10 @@ async fn remote_update_agent(
     let sf = match require_starflask(&state).await { Ok(sf) => sf, Err(resp) => return resp };
     let agent_id = match parse_uuid(&path.into_inner()) { Ok(id) => id, Err(resp) => return resp };
 
-    let name = body.get("name").and_then(|v| v.as_str());
+    let name = match body.get("name").and_then(|v| v.as_str()) {
+        Some(n) => n,
+        None => return HttpResponse::BadRequest().json(json!({ "error": "name is required" })),
+    };
     let description = body.get("description").and_then(|v| v.as_str());
     match sf.update_agent(&agent_id, name, description).await {
         Ok(agent) => HttpResponse::Ok().json(agent),
