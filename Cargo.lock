@@ -434,6 +434,8 @@ checksum = "c08606f8c3cbf4ce6ec8e28fb0014a2c086708fe954eaa885384a6165172e7e8"
 [[package]]
 name = "axoniac"
 version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7e8bdd0b40a0eb6ea9822d541c19bd380de637f3d10ed81c4bbefd6950791d6f"
 dependencies = [
  "reqwest 0.12.28",
  "serde",
@@ -4103,9 +4105,7 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 
 [[package]]
 name = "starflask"
-version = "0.1.2"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "3ae5743adfcfd70bde7b8f32105cafa521ea486b23f9fb8faac3bea76369fed5"
+version = "0.1.5"
 dependencies = [
  "reqwest 0.12.28",
  "serde",

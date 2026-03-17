@@ -47,12 +47,79 @@ impl AgentRegistry {
         Self { starflask, db, broadcaster }
     }
 
+    /// Ensure a "stark-bot" project exists on Starflask. Returns the project_id.
+    ///
+    /// 1. Check local DB cache (`STARFLASK_PROJECT_ID`)
+    /// 2. Validate it exists remotely
+    /// 3. If not cached/invalid: search existing projects, or create one
+    /// 4. Cache the project_id locally
+    /// 5. One-time migration: move ungrouped agents into the project
+    async fn ensure_project(&self) -> Result<Uuid, String> {
+        // Check cached project_id
+        if let Ok(Some(cached)) = self.db.get_api_key("STARFLASK_PROJECT_ID") {
+            if let Ok(project_id) = Uuid::parse_str(&cached.api_key) {
+                // Validate it still exists remotely
+                if self.starflask.get_project(&project_id).await.is_ok() {
+                    return Ok(project_id);
+                }
+                log::warn!("[AgentRegistry] Cached project_id {} no longer valid, re-discovering", project_id);
+            }
+        }
+
+        // Search existing projects for one named "stark-bot"
+        let project_id = match self.starflask.list_projects().await {
+            Ok(resp) => {
+                if let Some(existing) = resp.projects.iter().find(|p| p.name == "stark-bot") {
+                    log::info!("[AgentRegistry] Found existing 'stark-bot' project: {}", existing.id);
+                    existing.id
+                } else {
+                    // Create new project
+                    let project = self.starflask.create_project(
+                        "stark-bot",
+                        Some("Agents managed by stark-bot"),
+                    ).await.map_err(|e| format!("Failed to create project: {}", e))?;
+                    log::info!("[AgentRegistry] Created 'stark-bot' project: {}", project.id);
+                    project.id
+                }
+            }
+            Err(e) => return Err(format!("Failed to list projects: {}", e)),
+        };
+
+        // Cache locally
+        if let Err(e) = self.db.upsert_api_key("STARFLASK_PROJECT_ID", &project_id.to_string()) {
+            log::warn!("[AgentRegistry] Failed to cache project_id: {}", e);
+        }
+
+        // One-time migration: move any ungrouped agents into this project
+        if let Ok(all_agents) = self.starflask.list_agents().await {
+            for agent in &all_agents {
+                if agent.project_id.is_none() {
+                    log::info!("[AgentRegistry] Migrating ungrouped agent '{}' into project", agent.name);
+                    if let Err(e) = self.starflask.move_agent_to_project(&agent.id, Some(&project_id)).await {
+                        log::warn!("[AgentRegistry] Failed to move agent '{}' to project: {}", agent.name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(project_id)
+    }
+
+    /// Assign an agent to the stark-bot project.
+    async fn assign_to_project(&self, agent_id: &Uuid, project_id: &Uuid) -> Result<(), String> {
+        self.starflask.move_agent_to_project(agent_id, Some(project_id)).await
+            .map_err(|e| format!("Failed to assign agent to project: {}", e))?;
+        Ok(())
+    }
+
     /// Sync agents from the remote Starflask account into the local DB.
     /// Matches remote agents to capabilities by pack hash (from seed config) first,
     /// falling back to name-based inference for agents without a known pack.
     pub async fn sync_remote_agents(&self) -> Result<Vec<String>, String> {
-        let agents = self.starflask.list_agents().await
-            .map_err(|e| format!("Failed to list remote agents: {}", e))?;
+        // Ensure project exists and get project-scoped agents
+        let project_id = self.ensure_project().await?;
+        let agents = self.starflask.list_project_agents(&project_id).await
+            .map_err(|e| format!("Failed to list project agents: {}", e))?;
 
         if agents.is_empty() {
             log::info!("[AgentRegistry] No remote agents found, creating a General Assistant");
@@ -214,6 +281,9 @@ impl AgentRegistry {
             return Ok(vec![]);
         }
 
+        // Get project_id for assigning new agents
+        let project_id = self.ensure_project().await.ok();
+
         let mut provisioned = Vec::new();
 
         for agent_seed in &seed.agents {
@@ -280,6 +350,13 @@ impl AgentRegistry {
                     continue;
                 }
             };
+
+            // Assign to project
+            if let Some(ref pid) = project_id {
+                if let Err(e) = self.assign_to_project(&agent.id, pid).await {
+                    log::warn!("[AgentRegistry] Failed to assign '{}' to project: {}", agent_seed.name, e);
+                }
+            }
 
             if let Err(e) = self.starflask.update_agent(&agent.id, None, Some(&agent_seed.description)).await {
                 log::warn!("[AgentRegistry] Failed to set description for '{}': {}", agent_seed.name, e);
@@ -434,6 +511,13 @@ impl AgentRegistry {
 
         let agent = self.starflask.create_agent(&agent_seed.name).await
             .map_err(|e| format!("Failed to create agent: {}", e))?;
+
+        // Assign to project
+        if let Ok(project_id) = self.ensure_project().await {
+            if let Err(e) = self.assign_to_project(&agent.id, &project_id).await {
+                log::warn!("[AgentRegistry] Failed to assign reprovisioned '{}' to project: {}", capability, e);
+            }
+        }
 
         let _ = self.starflask.update_agent(&agent.id, None, Some(&agent_seed.description)).await;
 

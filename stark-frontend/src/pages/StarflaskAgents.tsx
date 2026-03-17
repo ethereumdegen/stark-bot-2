@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react';
-import { Bot, ChevronRight, Clock, Zap, Link2, Brain, ListTodo, RefreshCw, Plus, Trash2, Play, ExternalLink } from 'lucide-react';
+import { Bot, ChevronRight, Clock, Zap, Link2, Brain, ListTodo, RefreshCw, Plus, Trash2, Play, ExternalLink, FolderOpen } from 'lucide-react';
 import Card, { CardContent } from '@/components/ui/Card';
 import { apiFetch } from '@/lib/api';
 
@@ -57,6 +57,13 @@ export default function StarflaskAgents() {
   const [firingHook, setFiringHook] = useState<string | null>(null);
   const [hookPayload, setHookPayload] = useState('{}');
   const [deletingAgent, setDeletingAgent] = useState<string | null>(null);
+  const [projectId, setProjectId] = useState<string | null>(null);
+
+  useEffect(() => {
+    apiFetch<{ project_id: string | null }>('/starflask/project')
+      .then(data => setProjectId(data.project_id))
+      .catch(() => {});
+  }, []);
 
   const fetchAgents = useCallback(async () => {
     setLoading(true);
@@ -446,6 +453,12 @@ export default function StarflaskAgents() {
           <h1 className="text-2xl font-bold text-white mb-1">Starflask Agents</h1>
           <p className="text-slate-400 text-sm">
             {agents.length} provisioned · {remoteAgents.length} on Starflask
+            {projectId && (
+              <span className="ml-2 inline-flex items-center gap-1 px-2 py-0.5 rounded bg-stark-500/10 border border-stark-500/20 text-stark-400 text-xs">
+                <FolderOpen className="w-3 h-3" />
+                Project: stark-bot
+              </span>
+            )}
           </p>
         </div>
         <div className="flex gap-2">

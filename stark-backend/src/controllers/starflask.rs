@@ -15,6 +15,7 @@ pub fn config(cfg: &mut web::ServiceConfig) {
     cfg.service(
         web::scope("/api/starflask")
             // ── Starkbot registry & command routing ──────────
+            .route("/project", web::get().to(get_project))
             .route("/agents", web::get().to(list_agents))
             .route("/agents/{capability}", web::get().to(get_agent))
             .route("/agents/{capability}", web::delete().to(delete_agent_by_capability))
@@ -125,6 +126,18 @@ async fn init_starflask(state: web::Data<AppState>, req: HttpRequest) -> HttpRes
     } else {
         HttpResponse::BadRequest().json(json!({ "error": "No STARFLASK_API_KEY found in env or database" }))
     }
+}
+
+/// GET /api/starflask/project — get the cached Starflask project ID
+async fn get_project(state: web::Data<AppState>, req: HttpRequest) -> HttpResponse {
+    if let Err(resp) = super::validate_session(&state, &req) { return resp; }
+
+    let project_id = state.db.get_api_key("STARFLASK_PROJECT_ID")
+        .ok()
+        .flatten()
+        .map(|k| k.api_key);
+
+    HttpResponse::Ok().json(json!({ "project_id": project_id }))
 }
 
 /// GET /api/starflask/agents — list locally provisioned agents
