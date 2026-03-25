@@ -1,0 +1,568 @@
+//! Agent registry — syncs Starflask agents and manages local capability mappings.
+
+use std::collections::HashMap;
+use std::path::PathBuf;
+use std::sync::Arc;
+
+use serde_json::Value;
+use starflask::Starflask;
+use uuid::Uuid;
+
+use crate::db::Database;
+use crate::gateway::events::EventBroadcaster;
+use crate::gateway::protocol::GatewayEvent;
+use crate::models::StarflaskSeed;
+
+/// Load the pack definition JSON for a capability from the seed-packs directory.
+///
+/// Returns the full JSON object (with `soul`, `personas`, `pack` fields)
+/// ready to be sent to `Starflask::provision_pack`.
+fn load_pack_definition(capability: &str) -> Option<Value> {
+    let candidates = [
+        PathBuf::from(format!("seed-packs/packs/{}.json", capability)),
+        PathBuf::from(format!("../seed-packs/packs/{}.json", capability)),
+    ];
+    for path in &candidates {
+        if path.exists() {
+            let content = std::fs::read_to_string(path).ok()?;
+            let value: Value = serde_json::from_str(&content).ok()?;
+            return Some(value);
+        }
+    }
+    None
+}
+
+pub struct AgentRegistry {
+    starflask: Arc<Starflask>,
+    db: Arc<Database>,
+    broadcaster: Arc<EventBroadcaster>,
+}
+
+impl AgentRegistry {
+    pub fn new(
+        starflask: Arc<Starflask>,
+        db: Arc<Database>,
+        broadcaster: Arc<EventBroadcaster>,
+    ) -> Self {
+        Self { starflask, db, broadcaster }
+    }
+
+    /// Ensure a "stark-bot" project exists on Starflask. Returns the project_id.
+    ///
+    /// 1. Check local DB cache (`STARFLASK_PROJECT_ID`)
+    /// 2. Validate it exists remotely
+    /// 3. If not cached/invalid: search existing projects, or create one
+    /// 4. Cache the project_id locally
+    /// 5. One-time migration: move ungrouped agents into the project
+    async fn ensure_project(&self) -> Result<Uuid, String> {
+        // Check cached project_id
+        if let Ok(Some(cached)) = self.db.get_api_key("STARFLASK_PROJECT_ID") {
+            if let Ok(project_id) = Uuid::parse_str(&cached.api_key) {
+                // Validate it still exists remotely
+                if self.starflask.get_project(&project_id).await.is_ok() {
+                    return Ok(project_id);
+                }
+                log::warn!("[AgentRegistry] Cached project_id {} no longer valid, re-discovering", project_id);
+            }
+        }
+
+        // Search existing projects for one named "stark-bot"
+        let project_id = match self.starflask.list_projects().await {
+            Ok(resp) => {
+                if let Some(existing) = resp.projects.iter().find(|p| p.name == "stark-bot") {
+                    log::info!("[AgentRegistry] Found existing 'stark-bot' project: {}", existing.id);
+                    existing.id
+                } else {
+                    // Create new project
+                    let project = self.starflask.create_project(
+                        "stark-bot",
+                        Some("Agents managed by stark-bot"),
+                    ).await.map_err(|e| format!("Failed to create project: {}", e))?;
+                    log::info!("[AgentRegistry] Created 'stark-bot' project: {}", project.id);
+                    project.id
+                }
+            }
+            Err(e) => return Err(format!("Failed to list projects: {}", e)),
+        };
+
+        // Cache locally
+        if let Err(e) = self.db.upsert_api_key("STARFLASK_PROJECT_ID", &project_id.to_string()) {
+            log::warn!("[AgentRegistry] Failed to cache project_id: {}", e);
+        }
+
+        // One-time migration: move any ungrouped agents into this project
+        if let Ok(all_agents) = self.starflask.list_agents().await {
+            for agent in &all_agents {
+                if agent.project_id.is_none() {
+                    log::info!("[AgentRegistry] Migrating ungrouped agent '{}' into project", agent.name);
+                    if let Err(e) = self.starflask.move_agent_to_project(&agent.id, Some(&project_id)).await {
+                        log::warn!("[AgentRegistry] Failed to move agent '{}' to project: {}", agent.name, e);
+                    }
+                }
+            }
+        }
+
+        Ok(project_id)
+    }
+
+    /// Assign an agent to the stark-bot project.
+    async fn assign_to_project(&self, agent_id: &Uuid, project_id: &Uuid) -> Result<(), String> {
+        self.starflask.move_agent_to_project(agent_id, Some(project_id)).await
+            .map_err(|e| format!("Failed to assign agent to project: {}", e))?;
+        Ok(())
+    }
+
+    /// Sync agents from the remote Starflask account into the local DB.
+    /// Matches remote agents to capabilities by pack hash (from seed config) first,
+    /// falling back to name-based inference for agents without a known pack.
+    pub async fn sync_remote_agents(&self) -> Result<Vec<String>, String> {
+        // Ensure project exists and get project-scoped agents
+        let project_id = self.ensure_project().await?;
+        let agents = self.starflask.list_project_agents(&project_id).await
+            .map_err(|e| format!("Failed to list project agents: {}", e))?;
+
+        if agents.is_empty() {
+            log::info!("[AgentRegistry] No remote agents found, creating a General Assistant");
+            let agent = self.starflask.create_agent("General Assistant", Some(&project_id)).await
+                .map_err(|e| format!("Failed to create agent: {}", e))?;
+
+            self.db.upsert_starflask_agent(
+                "general", &agent.id, "General Assistant",
+                "General-purpose AI assistant", &[], "synced",
+            )?;
+
+            self.broadcaster.broadcast(GatewayEvent::new(
+                "starflask.agent_synced",
+                serde_json::json!({
+                    "capability": "general",
+                    "agent_id": agent.id.to_string(),
+                    "name": "General Assistant",
+                }),
+            ));
+
+            return Ok(vec!["general".to_string()]);
+        }
+
+        // Build pack_hash → capability lookup from seed config
+        let hash_to_capability: HashMap<String, String> = StarflaskSeed::load()
+            .map(|seed| {
+                seed.agents.iter()
+                    .map(|a| (a.pack_hash.clone(), a.capability.clone()))
+                    .collect()
+            })
+            .unwrap_or_default();
+
+        let mut synced = Vec::new();
+        let existing = self.db.list_starflask_agents().unwrap_or_default();
+        let remote_agent_ids: Vec<String> = agents.iter().map(|a| a.id.to_string()).collect();
+
+        // Prune local agents that no longer exist remotely
+        for local in &existing {
+            if !remote_agent_ids.contains(&local.agent_id) {
+                log::info!(
+                    "[AgentRegistry] Pruning ghost agent: {} ({})",
+                    local.capability, local.agent_id
+                );
+                let _ = self.db.delete_starflask_agent(&local.capability);
+                self.broadcaster.broadcast(GatewayEvent::new(
+                    "starflask.agent_removed",
+                    serde_json::json!({
+                        "capability": &local.capability,
+                        "agent_id": &local.agent_id,
+                    }),
+                ));
+            }
+        }
+
+        // Re-read after pruning
+        let existing = self.db.list_starflask_agents().unwrap_or_default();
+        let existing_agent_ids: Vec<String> = existing.iter().map(|a| a.agent_id.clone()).collect();
+
+        for agent in &agents {
+            // Skip if already tracked by agent_id
+            if existing_agent_ids.contains(&agent.id.to_string()) {
+                continue;
+            }
+
+            // Match by pack hash only — no guessing
+            let capability = match agent.axoniac_agent_hash.as_deref()
+                .and_then(|hash| hash_to_capability.get(hash))
+                .cloned()
+            {
+                Some(cap) => cap,
+                None => {
+                    log::info!(
+                        "[AgentRegistry] No pack hash match for '{}', skipping (will be picked up after pack is installed)",
+                        agent.name
+                    );
+                    continue;
+                }
+            };
+
+            let description = agent.description.as_deref().unwrap_or("");
+
+            // If this capability already exists with a DIFFERENT agent_id, update it
+            if let Some(existing_agent) = self.db.get_starflask_agent(&capability).ok().flatten() {
+                if existing_agent.agent_id != agent.id.to_string() {
+                    log::info!(
+                        "[AgentRegistry] Updating capability '{}': {} -> {}",
+                        capability, existing_agent.agent_id, agent.id
+                    );
+                    self.db.upsert_starflask_agent_str(
+                        &capability,
+                        &agent.id.to_string(),
+                        &agent.name,
+                        description,
+                        &existing_agent.pack_hashes,
+                        "synced",
+                    )?;
+                    synced.push(capability);
+                    continue;
+                }
+            }
+
+            self.db.upsert_starflask_agent_str(
+                &capability,
+                &agent.id.to_string(),
+                &agent.name,
+                description,
+                &[],
+                "synced",
+            )?;
+
+            synced.push(capability.clone());
+
+            self.broadcaster.broadcast(GatewayEvent::new(
+                "starflask.agent_synced",
+                serde_json::json!({
+                    "capability": &capability,
+                    "agent_id": agent.id.to_string(),
+                    "name": &agent.name,
+                }),
+            ));
+        }
+
+        // Deduplicate: if multiple capabilities point to the same agent_id, keep only the first
+        let all_agents = self.db.list_starflask_agents().unwrap_or_default();
+        let mut seen_ids = std::collections::HashSet::new();
+        for agent in &all_agents {
+            if !seen_ids.insert(agent.agent_id.clone()) {
+                log::info!(
+                    "[AgentRegistry] Removing duplicate capability '{}' (agent_id {} already mapped)",
+                    agent.capability, agent.agent_id
+                );
+                let _ = self.db.delete_starflask_agent(&agent.capability);
+            }
+        }
+
+        if !synced.is_empty() {
+            log::info!("[AgentRegistry] Synced {} agents: {:?}", synced.len(), synced);
+        } else {
+            log::info!("[AgentRegistry] All remote agents already tracked");
+        }
+
+        Ok(synced)
+    }
+
+    /// Provision agents from seed config (creates new agents with packs).
+    /// Only useful when real pack hashes are configured.
+    pub async fn provision_from_seed(&self) -> Result<Vec<String>, String> {
+        let seed = match StarflaskSeed::load() {
+            Some(s) => s,
+            None => {
+                log::info!("[AgentRegistry] No seed config found, skipping provisioning");
+                return Ok(vec![]);
+            }
+        };
+
+        // Skip if seed has placeholder hashes
+        let has_real_hashes = seed.agents.iter().any(|a| !a.pack_hash.contains("..."));
+        if !has_real_hashes {
+            log::info!("[AgentRegistry] Seed config has placeholder hashes, skipping pack provisioning");
+            return Ok(vec![]);
+        }
+
+        // Get project_id for assigning new agents
+        let project_id = self.ensure_project().await.ok();
+
+        let mut provisioned = Vec::new();
+
+        for agent_seed in &seed.agents {
+            // Check if this capability already exists in DB
+            let existing = self.db.get_starflask_agent(&agent_seed.capability).ok().flatten();
+
+            if let Some(ref existing_agent) = existing {
+                // Verify the agent still exists on Starflask
+                let agent_exists = if let Ok(agent_id) = Uuid::parse_str(&existing_agent.agent_id) {
+                    self.starflask.get_agent(&agent_id).await.is_ok()
+                } else {
+                    false
+                };
+
+                if !agent_exists {
+                    // Ghost agent — delete local row and fall through to create new
+                    log::info!(
+                        "[AgentRegistry] Agent '{}' no longer exists on Starflask, re-provisioning",
+                        agent_seed.capability
+                    );
+                    let _ = self.db.delete_starflask_agent(&agent_seed.capability);
+                } else if !existing_agent.pack_hashes.is_empty()
+                    && existing_agent.pack_hashes.contains(&agent_seed.pack_hash)
+                {
+                    // Already provisioned with the current seed hash
+                    continue;
+                } else if !existing_agent.pack_hashes.is_empty() {
+                    // Agent has a pack but it's stale (seed hash changed) — re-provision pack
+                    log::info!(
+                        "[AgentRegistry] Pack hash changed for '{}', re-provisioning (old: {:?}, new: {})",
+                        agent_seed.capability, existing_agent.pack_hashes, agent_seed.pack_hash
+                    );
+                    if let Ok(agent_id) = Uuid::parse_str(&existing_agent.agent_id) {
+                        if let Err(e) = self.provision_or_install_pack(&agent_id, &agent_seed.capability, &agent_seed.pack_hash).await {
+                            log::warn!("[AgentRegistry] Failed to update pack on '{}': {}", agent_seed.name, e);
+                            continue;
+                        }
+                        let _ = self.starflask.update_agent(&agent_id, &agent_seed.name, Some(&agent_seed.description)).await;
+                        let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
+                        let _ = self.db.upsert_starflask_agent(
+                            &agent_seed.capability, &agent_id, &agent_seed.name,
+                            &agent_seed.description, pack_hashes, "provisioned",
+                        );
+                        provisioned.push(agent_seed.capability.clone());
+                        self.broadcaster.broadcast(GatewayEvent::new(
+                            "starflask.agent_provisioned",
+                            serde_json::json!({
+                                "capability": &agent_seed.capability,
+                                "agent_id": agent_id.to_string(),
+                                "name": &agent_seed.name,
+                                "pack_updated": true,
+                            }),
+                        ));
+                    }
+                    continue;
+                } else {
+                    // Agent exists but has no packs — provision pack on it
+                    log::info!(
+                        "[AgentRegistry] Installing seed packs on existing agent: {} ({})",
+                        agent_seed.name, agent_seed.capability
+                    );
+                    if let Ok(agent_id) = Uuid::parse_str(&existing_agent.agent_id) {
+                        if let Err(e) = self.provision_or_install_pack(&agent_id, &agent_seed.capability, &agent_seed.pack_hash).await {
+                            log::warn!("[AgentRegistry] Failed to install pack on '{}': {}", agent_seed.name, e);
+                        }
+                        if existing_agent.description.is_empty() {
+                            let _ = self.starflask.update_agent(&agent_id, &agent_seed.name, Some(&agent_seed.description)).await;
+                        }
+                        let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
+                        let _ = self.db.upsert_starflask_agent(
+                            &agent_seed.capability, &agent_id, &agent_seed.name,
+                            &agent_seed.description, pack_hashes, "provisioned",
+                        );
+                        provisioned.push(agent_seed.capability.clone());
+                        self.broadcaster.broadcast(GatewayEvent::new(
+                            "starflask.agent_provisioned",
+                            serde_json::json!({
+                                "capability": &agent_seed.capability,
+                                "agent_id": agent_id.to_string(),
+                                "name": &agent_seed.name,
+                            }),
+                        ));
+                    }
+                    continue;
+                }
+            }
+
+            // No existing agent (or ghost was pruned) — create a new one
+            log::info!("[AgentRegistry] Provisioning agent: {} ({})", agent_seed.name, agent_seed.capability);
+
+            let agent = match self.starflask.create_agent(&agent_seed.name, project_id.as_ref()).await {
+                Ok(a) => a,
+                Err(e) => {
+                    log::error!("[AgentRegistry] Failed to create agent '{}': {}", agent_seed.name, e);
+                    continue;
+                }
+            };
+
+            if let Err(e) = self.starflask.update_agent(&agent.id, &agent_seed.name, Some(&agent_seed.description)).await {
+                log::warn!("[AgentRegistry] Failed to set description for '{}': {}", agent_seed.name, e);
+            }
+
+            if let Err(e) = self.provision_or_install_pack(&agent.id, &agent_seed.capability, &agent_seed.pack_hash).await {
+                log::error!("[AgentRegistry] Failed to install pack on '{}': {}", agent_seed.name, e);
+            }
+
+            let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
+            if let Err(e) = self.db.upsert_starflask_agent(
+                &agent_seed.capability, &agent.id, &agent_seed.name,
+                &agent_seed.description, pack_hashes, "provisioned",
+            ) {
+                log::error!("[AgentRegistry] Failed to save agent '{}' to DB: {}", agent_seed.name, e);
+                continue;
+            }
+
+            provisioned.push(agent_seed.capability.clone());
+
+            self.broadcaster.broadcast(GatewayEvent::new(
+                "starflask.agent_provisioned",
+                serde_json::json!({
+                    "capability": &agent_seed.capability,
+                    "agent_id": agent.id.to_string(),
+                    "name": &agent_seed.name,
+                }),
+            ));
+        }
+
+        if !provisioned.is_empty() {
+            log::info!("[AgentRegistry] Provisioned {} agents: {:?}", provisioned.len(), provisioned);
+        }
+
+        Ok(provisioned)
+    }
+
+    /// Provision or install a pack on an agent.
+    ///
+    /// Prefers `provision_pack` (sends full pack definition from seed-packs JSON)
+    /// because it also sets `axoniac_agent_hash` + `inference_source` on the
+    /// Starflask agent record. Falls back to `install_agent_pack` (hash-only)
+    /// if the pack definition file isn't available.
+    async fn provision_or_install_pack(
+        &self,
+        agent_id: &Uuid,
+        capability: &str,
+        pack_hash: &str,
+    ) -> Result<(), String> {
+        // Try provision_pack with full definition first
+        if let Some(pack_def) = load_pack_definition(capability) {
+            log::info!("[AgentRegistry] Using provision_pack for '{}' (full definition)", capability);
+            match self.starflask.provision_pack(agent_id, pack_def).await {
+                Ok(result) => {
+                    log::info!(
+                        "[AgentRegistry] Pack provisioned on '{}': hash={}",
+                        capability,
+                        result.content_hash
+                    );
+                    return Ok(());
+                }
+                Err(e) => {
+                    log::warn!(
+                        "[AgentRegistry] provision_pack failed for '{}': {} — falling back to install_agent_pack",
+                        capability, e
+                    );
+                }
+            }
+        }
+
+        // Fallback: install by hash
+        if let Err(e) = self.starflask.install_agent_pack(agent_id, pack_hash).await {
+            log::error!(
+                "[AgentRegistry] install_agent_pack failed for '{}' hash {}: {}",
+                capability, pack_hash, e
+            );
+            return Err(format!("Pack install failed for hash {}: {}", pack_hash, e));
+        }
+        Ok(())
+    }
+
+    /// Look up the `output_type` from a capability's pack definition.
+    /// Returns `"text"` if not set.
+    pub fn get_output_type(&self, capability: &str) -> String {
+        load_pack_definition(capability)
+            .and_then(|def| {
+                def.get("pack")
+                    .and_then(|p| p.get("definition"))
+                    .and_then(|d| d.get("output_type"))
+                    .and_then(|v| v.as_str())
+                    .map(String::from)
+            })
+            .unwrap_or_else(|| "text".to_string())
+    }
+
+    /// Look up agent_id for a capability.
+    pub fn get_agent_id(&self, capability: &str) -> Option<Uuid> {
+        self.db
+            .get_starflask_agent(capability)
+            .ok()?
+            .and_then(|a| Uuid::parse_str(&a.agent_id).ok())
+    }
+
+    /// Get any available agent (fallback when no specific capability match).
+    pub fn get_any_agent_id(&self) -> Option<Uuid> {
+        self.db
+            .list_starflask_agents()
+            .ok()?
+            .first()
+            .and_then(|a| Uuid::parse_str(&a.agent_id).ok())
+    }
+
+    /// Delete a single agent by capability (remote + local).
+    pub async fn delete_agent(&self, capability: &str) -> Result<(), String> {
+        if let Ok(Some(existing)) = self.db.get_starflask_agent(capability) {
+            if let Ok(uuid) = Uuid::parse_str(&existing.agent_id) {
+                if let Err(e) = self.starflask.delete_agent(&uuid).await {
+                    log::warn!("[AgentRegistry] Failed to delete agent on Starflask: {}", e);
+                }
+            }
+            self.db.delete_starflask_agent(capability)
+                .map_err(|e| format!("Failed to delete local agent: {}", e))?;
+
+            self.broadcaster.broadcast(GatewayEvent::new(
+                "starflask.agent_deleted",
+                serde_json::json!({
+                    "capability": capability,
+                }),
+            ));
+
+            Ok(())
+        } else {
+            Err(format!("Agent '{}' not found", capability))
+        }
+    }
+
+    /// Re-provision a single capability (delete + re-create).
+    pub async fn reprovision(&self, capability: &str) -> Result<Uuid, String> {
+        let seed = StarflaskSeed::load().ok_or("No seed config found")?;
+        let agent_seed = seed
+            .agents
+            .iter()
+            .find(|a| a.capability == capability)
+            .ok_or_else(|| format!("Capability '{}' not found in seed config", capability))?;
+
+        if let Ok(Some(existing)) = self.db.get_starflask_agent(capability) {
+            if let Ok(uuid) = Uuid::parse_str(&existing.agent_id) {
+                let _ = self.starflask.delete_agent(&uuid).await;
+            }
+            let _ = self.db.delete_starflask_agent(capability);
+        }
+
+        let project_id = self.ensure_project().await.ok();
+        let agent = self.starflask.create_agent(&agent_seed.name, project_id.as_ref()).await
+            .map_err(|e| format!("Failed to create agent: {}", e))?;
+
+        let _ = self.starflask.update_agent(&agent.id, &agent_seed.name, Some(&agent_seed.description)).await;
+
+        self.provision_or_install_pack(&agent.id, capability, &agent_seed.pack_hash).await
+            .map_err(|e| format!("Agent created (id={}) but pack install failed: {}", agent.id, e))?;
+
+        let pack_hashes = std::slice::from_ref(&agent_seed.pack_hash);
+        self.db.upsert_starflask_agent(
+            capability, &agent.id, &agent_seed.name,
+            &agent_seed.description, pack_hashes, "provisioned",
+        )?;
+
+        self.broadcaster.broadcast(GatewayEvent::new(
+            "starflask.agent_reprovisioned",
+            serde_json::json!({
+                "capability": capability,
+                "agent_id": agent.id.to_string(),
+            }),
+        ));
+
+        Ok(agent.id)
+    }
+
+    /// List all provisioned/synced agents.
+    pub fn list_agents(&self) -> Result<Vec<crate::db::tables::starflask_agents::StarflaskAgent>, String> {
+        self.db.list_starflask_agents()
+    }
+
+}
