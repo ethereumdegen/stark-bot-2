@@ -168,14 +168,48 @@ export default function CommandCenter() {
       }
     };
 
+    const onSessionProgress = (data: unknown) => {
+      const event = data as {
+        command_id: number;
+        session_id: string;
+        event: string;
+        summary?: string;
+      };
+      if (event.event === 'status_change') return;
+      const summary = event.summary || event.event;
+      if (!summary) return;
+
+      let icon = '⚙️';
+      if (event.event === 'assistant_tool_calls') {
+        icon = summary.startsWith('Delegating') ? '🔀' : '🔧';
+      } else if (event.event === 'tool_results') {
+        icon = '📋';
+      } else if (event.event === 'report_result') {
+        icon = '✅';
+      }
+
+      setMessages((prev) => {
+        // Replace previous transient progress messages (keep tool_results and report_result)
+        if (event.event !== 'report_result' && event.event !== 'tool_results') {
+          const filtered = prev.filter((m) =>
+            m.role !== 'system' || (!m.content.startsWith('⚙️') && !m.content.startsWith('🔧') && !m.content.startsWith('🔀'))
+          );
+          return [...filtered, { id: `progress-${Date.now()}`, role: 'system' as const, content: `${icon} ${summary}`, timestamp: new Date() }];
+        }
+        return [...prev, { id: `progress-${Date.now()}`, role: 'system' as const, content: `${icon} ${summary}`, timestamp: new Date() }];
+      });
+    };
+
     on('starflask.delegation', onDelegation);
     on('starflask.command_started', onStarted);
     on('starflask.command_completed', onCompleted);
+    on('starflask.session_progress', onSessionProgress);
 
     return () => {
       off('starflask.delegation', onDelegation);
       off('starflask.command_started', onStarted);
       off('starflask.command_completed', onCompleted);
+      off('starflask.session_progress', onSessionProgress);
     };
   }, [on, off]);
 

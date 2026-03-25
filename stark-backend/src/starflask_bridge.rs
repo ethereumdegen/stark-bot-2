@@ -16,7 +16,12 @@ pub fn create_starflask_client() -> Option<Starflask> {
     let base_url = std::env::var("STARFLASK_BASE_URL").ok();
     let url = base_url.as_deref().unwrap_or(DEFAULT_STARFLASK_URL);
     match Starflask::new(&api_key, Some(url)) {
-        Ok(client) => Some(client),
+        Ok(mut client) => {
+            // Agent queries with delegation chains can take 5+ minutes.
+            // Default 120s is too short — bump to 10 minutes.
+            client.poll_config.timeout = std::time::Duration::from_secs(600);
+            Some(client)
+        }
         Err(e) => {
             log::error!("Failed to create Starflask client: {}", e);
             None
@@ -40,7 +45,8 @@ pub fn create_starflask_client_with_db(db: &crate::db::Database) -> Option<Starf
     let base_url = std::env::var("STARFLASK_BASE_URL").ok();
     let url = base_url.as_deref().unwrap_or(DEFAULT_STARFLASK_URL);
     match Starflask::new(&api_key, Some(url)) {
-        Ok(client) => {
+        Ok(mut client) => {
+            client.poll_config.timeout = std::time::Duration::from_secs(600);
             log::info!("Starflask client initialized from database API key");
             Some(client)
         }
@@ -49,6 +55,19 @@ pub fn create_starflask_client_with_db(db: &crate::db::Database) -> Option<Starf
             None
         }
     }
+}
+
+/// Get the Starflask API credentials (api_key, base_url).
+/// Tries env var first, then DB.
+pub fn get_starflask_credentials(db: &crate::db::Database) -> Option<(String, String)> {
+    let api_key = std::env::var("STARFLASK_API_KEY").ok()
+        .or_else(|| db.get_api_key("STARFLASK_API_KEY").ok().flatten().map(|k| k.api_key))
+        .filter(|k| !k.is_empty())?;
+
+    let base_url = std::env::var("STARFLASK_BASE_URL").ok()
+        .unwrap_or_else(|| DEFAULT_STARFLASK_URL.to_string());
+
+    Some((api_key, base_url))
 }
 
 /// Get the default agent ID from environment.

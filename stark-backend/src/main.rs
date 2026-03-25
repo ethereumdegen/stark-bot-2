@@ -61,9 +61,12 @@ impl AppState {
         let registry = Arc::new(agent_registry::AgentRegistry::new(
             sf.clone(), self.db.clone(), self.broadcaster.clone(),
         ));
+        let (api_key, base_url) = starflask_bridge::get_starflask_credentials(&self.db)
+            .unwrap_or_default();
         let router = Arc::new(command_router::CommandRouter::new(
             registry.clone(), sf.clone(), self.crypto_executor.clone(),
             self.db.clone(), self.broadcaster.clone(),
+            api_key, base_url,
         ));
 
         *self.starflask.write().await = Some(sf);
@@ -342,8 +345,11 @@ async fn main() -> std::io::Result<()> {
         let registry = Arc::new(agent_registry::AgentRegistry::new(
             sf.clone(), db.clone(), broadcaster.clone(),
         ));
+        let (api_key, base_url) = starflask_bridge::get_starflask_credentials(&db)
+            .unwrap_or_default();
         let router = Arc::new(command_router::CommandRouter::new(
             registry.clone(), sf.clone(), crypto_executor.clone(), db.clone(), broadcaster.clone(),
+            api_key, base_url,
         ));
         (Some(registry), Some(router))
     } else {

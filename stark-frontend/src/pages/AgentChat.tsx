@@ -695,6 +695,84 @@ export default function AgentChat() {
     };
   }, [on, off, sessionId, dbSessionId]);
 
+  // Listen for Starflask session progress events (iteration logs, tool calls, delegations)
+  useEffect(() => {
+    const handleSessionProgress = (data: unknown) => {
+      const event = data as {
+        command_id: number;
+        session_id: string;
+        event: string;
+        iteration?: number;
+        summary?: string;
+        status?: string;
+        raw?: Record<string, unknown>;
+      };
+
+      // Skip status_change events (too noisy, just "claimed"/"completed")
+      if (event.event === 'status_change') return;
+
+      const summary = event.summary || event.event;
+      if (!summary) return;
+
+      // Pick an icon based on event type
+      let icon = '⚙️';
+      if (event.event === 'assistant_tool_calls') {
+        icon = summary.startsWith('Delegating') ? '🔀' : '🔧';
+      } else if (event.event === 'tool_results') {
+        icon = '📋';
+      } else if (event.event === 'report_result') {
+        icon = '✅';
+      } else if (event.event === 'assistant_text') {
+        icon = '💭';
+      } else if (event.event === 'llm_error') {
+        icon = '⚠️';
+      }
+
+      const content = `${icon} ${summary}`;
+
+      setMessages((prev) => {
+        // Replace previous progress messages of the same type to avoid spam
+        const isProgressMsg = (m: ChatMessageType) =>
+          m.role === 'system' && m.content.startsWith('⚙️') ||
+          m.role === 'system' && m.content.startsWith('🔧') ||
+          m.role === 'system' && m.content.startsWith('🔀') ||
+          m.role === 'system' && m.content.startsWith('📋') ||
+          m.role === 'system' && m.content.startsWith('💭');
+
+        // Keep report_result messages, replace others
+        if (event.event !== 'report_result' && event.event !== 'tool_results') {
+          const filtered = prev.filter((m) => !isProgressMsg(m));
+          return [
+            ...filtered,
+            {
+              id: crypto.randomUUID(),
+              role: 'system' as MessageRole,
+              content,
+              timestamp: new Date(),
+              sessionId,
+            },
+          ];
+        }
+
+        return [
+          ...prev,
+          {
+            id: crypto.randomUUID(),
+            role: 'system' as MessageRole,
+            content,
+            timestamp: new Date(),
+            sessionId,
+          },
+        ];
+      });
+    };
+
+    on('starflask.session_progress', handleSessionProgress);
+    return () => {
+      off('starflask.session_progress', handleSessionProgress);
+    };
+  }, [on, off, sessionId]);
+
   // Listen for session_created events (web gateway pattern: fresh session per message)
   useEffect(() => {
     const handleSessionCreated = (data: unknown) => {
@@ -1499,10 +1577,15 @@ export default function AgentChat() {
 
     try {
       const response = await sendChatMessage(trimmedInput, conversationHistory.current, currentNetwork?.name);
-      // Remove "still thinking" progress messages before adding the response
-      setMessages((prev) => prev.filter(
-        (m) => !(m.role === 'system' && m.content.startsWith('Still thinking'))
-      ));
+      // Remove progress messages (still thinking + starflask session progress) before adding response
+      setMessages((prev) => prev.filter((m) => {
+        if (m.role !== 'system') return true;
+        if (m.content.startsWith('Still thinking')) return false;
+        // Clean up starflask session progress indicators
+        if (m.content.startsWith('⚙️') || m.content.startsWith('🔧') ||
+            m.content.startsWith('🔀') || m.content.startsWith('💭')) return false;
+        return true;
+      }));
       // Skip empty responses and responses already delivered via say_to_user WebSocket event
       if (response.response.trim()) {
         // UUID-based dedup: if the WebSocket already rendered this message, skip
