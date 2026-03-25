@@ -48,6 +48,7 @@ async fn get_config_status(state: web::Data<AppState>) -> impl Responder {
     let starflask_connected = state.starflask.read().await.is_some();
 
     HttpResponse::Ok().json(serde_json::json!({
+        "flash_mode": crate::wallet::is_flash_mode(),
         "login_configured": state.config.login_admin_public_address.is_some(),
         "burner_wallet_configured": state.config.burner_wallet_private_key.is_some(),
         "wallet_configured": state.wallet_provider.is_some(),

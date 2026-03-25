@@ -2,6 +2,7 @@ export const API_BASE = '/api';
 
 // Config Status API (unauthenticated)
 export interface ConfigStatus {
+  flash_mode: boolean;
   login_configured: boolean;
   burner_wallet_configured: boolean;
   wallet_configured: boolean;

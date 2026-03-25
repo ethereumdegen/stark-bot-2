@@ -1,7 +1,7 @@
 import { useState, useMemo, useEffect } from 'react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { BrowserProvider } from 'ethers';
-import { generateChallenge, validateAuth, getConfigStatus, ConfigStatus } from '@/lib/api';
+import { generateChallenge, validateAuth, getConfigStatus, ConfigStatus, createAutoSession } from '@/lib/api';
 import Button from '@/components/ui/Button';
 import Card, { CardContent } from '@/components/ui/Card';
 import UnicodeSpinner from '@/components/ui/UnicodeSpinner';
@@ -56,10 +56,25 @@ export default function Login() {
     }
   }, [location, navigate]);
 
-  // Fetch config status on mount to show appropriate warnings
+  // Fetch config status on mount; auto-login in Flash mode
   useEffect(() => {
     getConfigStatus()
-      .then(setConfigStatus)
+      .then((config) => {
+        setConfigStatus(config);
+        if (config.flash_mode) {
+          setState('flash');
+          createAutoSession()
+            .then((result) => {
+              localStorage.setItem('stark_token', result.token);
+              window.location.href = '/dashboard';
+            })
+            .catch((err) => {
+              console.error('Auto-session failed:', err);
+              setState('idle');
+              setError('Auto-login failed. Try opening from starkbot.cloud.');
+            });
+        }
+      })
       .catch((err) => console.error('Failed to fetch config status:', err));
   }, []);
 

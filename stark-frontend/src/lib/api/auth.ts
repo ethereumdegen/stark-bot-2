@@ -53,3 +53,18 @@ export async function logout(): Promise<void> {
   await apiFetch('/auth/logout', { method: 'POST' });
   localStorage.removeItem('stark_token');
 }
+
+export async function createAutoSession(): Promise<{ token: string }> {
+  const response = await fetch(`${API_BASE}/auth/auto-session`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+  });
+
+  const data = await response.json();
+
+  if (!response.ok || !data.success) {
+    throw new Error(data.error || 'Auto-session creation failed');
+  }
+
+  return { token: data.token };
+}

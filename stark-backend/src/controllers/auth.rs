@@ -61,7 +61,8 @@ pub fn config(cfg: &mut web::ServiceConfig) {
             .route("/generate_challenge", web::post().to(generate_challenge))
             .route("/validate_auth", web::post().to(validate_auth))
             .route("/logout", web::post().to(logout))
-            .route("/validate", web::get().to(validate)),
+            .route("/validate", web::get().to(validate))
+            .route("/auto-session", web::post().to(auto_session)),
     );
     // Flash mode auth - separate from /api/auth scope to allow redirect
     cfg.route("/auth/flash", web::get().to(flash_login));
@@ -248,6 +249,40 @@ async fn validate(state: web::Data<AppState>, req: HttpRequest) -> impl Responde
         Err(e) => {
             log::error!("Failed to validate session: {}", e);
             HttpResponse::Ok().json(ValidateResponse { valid: false })
+        }
+    }
+}
+
+// ==================== Auto-Session (Flash Mode) ====================
+
+/// Creates a session without wallet auth — only available in Flash mode.
+async fn auto_session(state: web::Data<AppState>) -> impl Responder {
+    use crate::wallet;
+
+    if !wallet::is_flash_mode() {
+        return HttpResponse::Forbidden().json(LoginResponse {
+            success: false,
+            token: None,
+            expires_at: None,
+            error: Some("Auto-session is only available in Flash mode".to_string()),
+        });
+    }
+
+    match state.db.create_session_for_address(None) {
+        Ok(session) => HttpResponse::Ok().json(LoginResponse {
+            success: true,
+            token: Some(session.token),
+            expires_at: Some(session.expires_at.timestamp()),
+            error: None,
+        }),
+        Err(e) => {
+            log::error!("Failed to create auto-session: {}", e);
+            HttpResponse::InternalServerError().json(LoginResponse {
+                success: false,
+                token: None,
+                expires_at: None,
+                error: Some("Failed to create session".to_string()),
+            })
         }
     }
 }
